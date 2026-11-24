@@ -1,0 +1,295 @@
+
+name: SkyHawk SHRP - Google Pixel 6a
+
+on:
+  workflow_dispatch:
+    inputs:
+      MANIFEST:
+        description: SHRP Manifest
+        required: true
+        default: [github.com](https://github.com/SHRP-Reborn/manifest.git)
+
+      MANIFEST_BRANCH:
+        description: SHRP Manifest Branch
+        required: true
+        type: choice
+        default: shrp-12.1
+        options:
+          - shrp-12.1
+
+      DEVICE_TREE:
+        description: Pixel 6a Device Tree
+        required: true
+        default: [github.com](https://github.com/REPLACE_ME/android_device_google_bluejay.git)
+
+      DEVICE_TREE_BRANCH:
+        description: Pixel 6a Device Tree Branch
+        required: true
+        default: android-12.1
+
+      DEVICE_PATH:
+        description: Device Tree Location
+        required: true
+        default: device/google/bluejay
+
+      DEVICE_NAME:
+        description: Device Codename
+        required: true
+        default: bluejay
+
+      DEVICE_MAKEFILE:
+        description: Recovery Product Makefile
+        required: true
+        default: twrp_bluejay
+
+      BUILD_TARGET:
+        description: Recovery Image Target
+        required: true
+        type: choice
+        default: boot
+        options:
+          - boot
+          - vendorboot
+          - recovery
+
+jobs:
+  build:
+    name: Build SHRP for Pixel 6a
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    permissions:
+      contents: read
+
+    env:
+      DEVICE: bluejay
+      DEVICE_PATH: device/google/bluejay
+      OUTPUT_DIR: android-recovery/out/target/product/bluejay
+
+    steps:
+      - name: Checkout Builder
+        uses: actions/checkout@v4
+
+      - name: Display Build Information
+        run: |
+          echo "================================"
+          echo "Device: Google Pixel 6a"
+          echo "Codename: bluejay"
+          echo "Model: GX7AS / GB62Z / G1AZG"
+          echo "Manifest: ${{ inputs.MANIFEST }}"
+          echo "Manifest Branch: ${{ inputs.MANIFEST_BRANCH }}"
+          echo "Device Tree: ${{ inputs.DEVICE_TREE }}"
+          echo "Device Branch: ${{ inputs.DEVICE_TREE_BRANCH }}"
+          echo "Device Path: ${{ inputs.DEVICE_PATH }}"
+          echo "Device Makefile: ${{ inputs.DEVICE_MAKEFILE }}"
+          echo "Build Target: ${{ inputs.BUILD_TARGET }}"
+          echo "================================"
+
+      - name: Free Disk Space
+        uses: rokibhasansagar/slimhub_actions@main
+
+      - name: Setup Swap
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 12
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            curl \
+            flex \
+            g++-multilib \
+            gcc-multilib \
+            git \
+            git-lfs \
+            gnupg \
+            gperf \
+            imagemagick \
+            lib32ncurses-dev \
+            lib32readline-dev \
+            lib32z1-dev \
+            libelf-dev \
+            liblz4-tool \
+            libncurses-dev \
+            libssl-dev \
+            libxml2-utils \
+            lzop \
+            pngcrush \
+            python3 \
+            python-is-python3 \
+            rsync \
+            schedtool \
+            squashfs-tools \
+            unzip \
+            wget \
+            zip \
+            zlib1g-dev
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '11'
+
+      - name: Setup Ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: shrp-bluejay-${{ inputs.MANIFEST_BRANCH }}
+          restore-keys: |
+            shrp-bluejay-
+          max-size: 10G
+
+      - name: Install Repo Tool
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fL \
+            [storage.googleapis.com](https://storage.googleapis.com/git-repo-downloads/repo) \
+            -o "$HOME/bin/repo"
+          chmod +x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Initialize SHRP Source
+        run: |
+          mkdir -p android-recovery
+          cd android-recovery
+
+          git config --global user.name "Pixel 6a SHRP Builder"
+          git config --global user.email "bluejay-builder@users.noreply.github.com"
+
+          repo init \
+            --depth=1 \
+            -u "${{ inputs.MANIFEST }}" \
+            -b "${{ inputs.MANIFEST_BRANCH }}"
+
+      - name: Sync SHRP Source
+        run: |
+          cd android-recovery
+
+          repo sync \
+            -c \
+            -j2 \
+            --force-sync \
+            --no-clone-bundle \
+            --no-tags
+
+      - name: Clone Pixel 6a Device Tree
+        run: |
+          cd android-recovery
+
+          rm -rf "${{ inputs.DEVICE_PATH }}"
+          mkdir -p "$(dirname "${{ inputs.DEVICE_PATH }}")"
+
+          git clone \
+            --depth=1 \
+            --single-branch \
+            -b "${{ inputs.DEVICE_TREE_BRANCH }}" \
+            "${{ inputs.DEVICE_TREE }}" \
+            "${{ inputs.DEVICE_PATH }}"
+
+          cd "${{ inputs.DEVICE_PATH }}"
+
+          echo "DEVICE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Verify Pixel 6a Device Tree
+        run: |
+          TREE="android-recovery/${{ inputs.DEVICE_PATH }}"
+          PRODUCT="${{ inputs.DEVICE_MAKEFILE }}"
+
+          test -f "$TREE/BoardConfig.mk"
+          test -f "$TREE/AndroidProducts.mk"
+
+          if [ ! -f "$TREE/$PRODUCT.mk" ]; then
+            echo "::error::Missing expected product makefile: $TREE/$PRODUCT.mk"
+            echo "Makefiles found in the tree root:"
+            find "$TREE" -maxdepth 1 -name "*.mk" -print || true
+            exit 1
+          fi
+
+          grep -q "$PRODUCT" "$TREE/AndroidProducts.mk" || \
+            echo "::warning::$PRODUCT is not listed literally in AndroidProducts.mk."
+
+          echo "Pixel 6a device tree verified."
+
+      - name: Select Build Target
+        run: |
+          case "${{ inputs.BUILD_TARGET }}" in
+            boot)
+              echo "BUILD_COMMAND=bootimage" >> "$GITHUB_ENV"
+              echo "OUTPUT_IMAGE=boot.img" >> "$GITHUB_ENV"
+              ;;
+            vendorboot)
+              echo "BUILD_COMMAND=vendorbootimage" >> "$GITHUB_ENV"
+              echo "OUTPUT_IMAGE=vendor_boot.img" >> "$GITHUB_ENV"
+              ;;
+            recovery)
+              echo "BUILD_COMMAND=recoveryimage" >> "$GITHUB_ENV"
+              echo "OUTPUT_IMAGE=recovery.img" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "::error::Unsupported build target: ${{ inputs.BUILD_TARGET }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Setup Build Environment
+        run: |
+          cd android-recovery
+
+          export ALLOW_MISSING_DEPENDENCIES=true
+
+          source build/envsetup.sh
+
+          lunch "${{ inputs.DEVICE_MAKEFILE }}-eng"
+
+      - name: Build SkyHawk Recovery
+        run: |
+          cd android-recovery
+
+          export ALLOW_MISSING_DEPENDENCIES=true
+          export USE_CCACHE=1
+
+          source build/envsetup.sh
+
+          lunch "${{ inputs.DEVICE_MAKEFILE }}-eng"
+
+          mka "$BUILD_COMMAND" -j2
+
+      - name: Verify Recovery Image
+        if: always()
+        run: |
+          IMAGE="$OUTPUT_DIR/$OUTPUT_IMAGE"
+
+          if [ -f "$IMAGE" ]; then
+            echo "BUILD_SUCCESS=true" >> "$GITHUB_ENV"
+
+            echo "Recovery image successfully created."
+
+            md5sum "$IMAGE" | tee "$IMAGE.md5"
+            sha256sum "$IMAGE" | tee "$IMAGE.sha256"
+            ls -lh "$IMAGE"
+          else
+            echo "BUILD_SUCCESS=false" >> "$GITHUB_ENV"
+
+            echo "::error::Expected image was not found: $IMAGE"
+            echo "Images present in the output directory:"
+            find "$OUTPUT_DIR" -maxdepth 1 \
+              -type f \( -name "*.img" -o -name "*.zip" \) -print || true
+          fi
+
+      - name: Upload Pixel 6a Recovery
+        if: success() && env.BUILD_SUCCESS == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SHRP-Pixel-6a-bluejay-${{ inputs.BUILD_TARGET }}
+          path: |
+            android-recovery/out/target/product/bluejay/${{ env.OUTPUT_IMAGE }}
+            android-recovery/out/target/product/bluejay/${{ env.OUTPUT_IMAGE }}.md5
+            android-recovery/out/target/product/bluejay/${{ env.OUTPUT_IMAGE }}.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
